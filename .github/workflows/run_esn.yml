@@ -14,11 +14,11 @@ on:
       max_pages:
         description: "Max pages per NAF"
         required: false
-        default: "80"
+        default: "20"
       sleep:
         description: "Sleep between calls (seconds)"
         required: false
-        default: "0.6"
+        default: "0.1"
       outfile:
         description: "Output CSV filename"
         required: false
