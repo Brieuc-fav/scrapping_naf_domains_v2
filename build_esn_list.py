@@ -84,7 +84,22 @@ INSEE_TOKEN_URL = os.getenv("SIRENE_TOKEN_URL", "https://api.insee.fr/token")
 INSEE_SIRENE_BASE = os.getenv("SIRENE_API_BASE", "https://api.insee.fr/api-sirene/3.11")
 INSEE_API_KEY = os.getenv("SIRENE_API_KEY")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-SERPER_API_KEY = os.getenv("SERPER_API_KEY")
+
+# Serper API keys - support multiple keys for fallback (SERPER_API_KEY_1, SERPER_API_KEY_2, etc.)
+SERPER_API_KEYS = []
+for i in range(1, 5):  # Support up to 4 keys
+    key = os.getenv(f"SERPER_API_KEY_{i}")
+    if key:
+        SERPER_API_KEYS.append(key)
+# Fallback to single SERPER_API_KEY if no numbered keys
+if not SERPER_API_KEYS:
+    single_key = os.getenv("SERPER_API_KEY")
+    if single_key:
+        SERPER_API_KEYS.append(single_key)
+
+# Track current Serper key index and usage
+CURRENT_SERPER_KEY_INDEX = 0
+SERPER_KEY_USAGE = {i: 0 for i in range(len(SERPER_API_KEYS))}
 
 
 # ---------------- Utilities ----------------
@@ -379,52 +394,119 @@ def serpapi_find_domain(
     except Exception:
         return None
 
+def get_next_serper_key() -> Optional[str]:
+    """
+    Get the next available Serper API key using round-robin rotation.
+    Returns None if no keys are available.
+    """
+    global CURRENT_SERPER_KEY_INDEX
+    if not SERPER_API_KEYS:
+        return None
+    key = SERPER_API_KEYS[CURRENT_SERPER_KEY_INDEX]
+    return key
+
+
+def rotate_serper_key() -> bool:
+    """
+    Rotate to the next Serper API key.
+    Returns True if rotation was successful, False if no more keys available.
+    """
+    global CURRENT_SERPER_KEY_INDEX
+    if len(SERPER_API_KEYS) <= 1:
+        return False
+    CURRENT_SERPER_KEY_INDEX = (CURRENT_SERPER_KEY_INDEX + 1) % len(SERPER_API_KEYS)
+    print(f"   Rotating to Serper API key #{CURRENT_SERPER_KEY_INDEX + 1}")
+    return True
+
+
 def serper_find_domain(
     query: str,
-    api_key: str,
+    api_key: Optional[str] = None,
     num: int = 5,
     hl: str = "fr",
     gl: str = "fr",
+    max_retries: int = None,
 ) -> Optional[str]:
     """
     Query serper.dev for the company and infer the official domain from organic results.
     Endpoint: POST https://google.serper.dev/search with JSON body.
+    
+    If api_key is None, uses the managed key rotation system.
+    If a 429 error (quota exceeded) is encountered, automatically rotates to next key.
     """
-    try:
-        url = "https://google.serper.dev/search"
-        headers = {
-            "X-API-KEY": api_key,
-            "Content-Type": "application/json",
-        }
-        payload = {"q": query, "num": num, "hl": hl, "gl": gl}
-        resp = SESSION.post(url, headers=headers, json=payload, timeout=20)
-        if resp.status_code != 200:
+    global CURRENT_SERPER_KEY_INDEX, SERPER_KEY_USAGE
+    
+    # Default to trying all available keys
+    if max_retries is None:
+        max_retries = len(SERPER_API_KEYS) if SERPER_API_KEYS else 1
+    
+    for attempt in range(max_retries):
+        # Use provided key or get from rotation
+        if api_key is None:
+            current_key = get_next_serper_key()
+            if not current_key:
+                print("   No Serper API keys available")
+                return None
+        else:
+            current_key = api_key
+        
+        try:
+            url = "https://google.serper.dev/search"
+            headers = {
+                "X-API-KEY": current_key,
+                "Content-Type": "application/json",
+            }
+            payload = {"q": query, "num": num, "hl": hl, "gl": gl}
+            resp = SESSION.post(url, headers=headers, json=payload, timeout=20)
+            
+            # Track usage
+            if api_key is None:
+                SERPER_KEY_USAGE[CURRENT_SERPER_KEY_INDEX] += 1
+            
+            # Handle rate limiting
+            if resp.status_code == 429:
+                print(f"   Serper API key #{CURRENT_SERPER_KEY_INDEX + 1} quota exceeded (429)")
+                if api_key is None and attempt < max_retries - 1:
+                    if rotate_serper_key():
+                        continue  # Try next key
+                return None
+            
+            if resp.status_code != 200:
+                print(f"   Serper API returned status {resp.status_code}")
+                return None
+            
+            data = resp.json() or {}
+            results = data.get("organic") or []
+            if not isinstance(results, list):
+                return None
+            
+            # Take the first acceptable organic result to maximize chances,
+            # while skipping obvious social/aggregator domains.
+            bad_hosts = {
+                "linkedin.com", "fr.linkedin.com", "facebook.com", "twitter.com", "x.com",
+                "societe.com", "societeinfo.com", "verif.com", "manageo.fr", "bloomberg.com",
+                "wikipedia.org", "indeed.fr", "welcometothejungle.com"
+            }
+            for r in results:
+                link = r.get("link") or r.get("url")
+                if not link:
+                    continue
+                host = extract_domain_from_url(link)
+                if not host:
+                    continue
+                host_l = host.lower()
+                if any(host_l.endswith(bad) or host_l == bad for bad in bad_hosts):
+                    continue
+                return host
             return None
-        data = resp.json() or {}
-        results = data.get("organic") or []
-        if not isinstance(results, list):
+        except Exception as e:
+            print(f"   Serper API exception: {e}")
+            if api_key is None and attempt < max_retries - 1:
+                rotate_serper_key()
+                continue
             return None
-        # Take the first acceptable organic result to maximize chances,
-        # while skipping obvious social/aggregator domains.
-        bad_hosts = {
-            "linkedin.com", "fr.linkedin.com", "facebook.com", "twitter.com", "x.com",
-            "societe.com", "societeinfo.com", "verif.com", "manageo.fr", "bloomberg.com",
-            "wikipedia.org", "indeed.fr", "welcometothejungle.com"
-        }
-        for r in results:
-            link = r.get("link") or r.get("url")
-            if not link:
-                continue
-            host = extract_domain_from_url(link)
-            if not host:
-                continue
-            host_l = host.lower()
-            if any(host_l.endswith(bad) or host_l == bad for bad in bad_hosts):
-                continue
-            return host
-        return None
-    except Exception:
-        return None
+    
+    return None
 
 
 # ---------------- API interactions ----------------
@@ -710,7 +792,6 @@ def process_candidate(
     serpapi_hl: str = "fr",
     serpapi_gl: str = "fr",
     use_serper: bool = False,
-    serper_key: Optional[str] = None,
 ) -> ProcessedCandidate:
     siren = e.get("siren")
     ul = e.get("unite_legale", {})
@@ -804,7 +885,7 @@ def process_candidate(
                 if serp_dom:
                     guessed_domains.append(serp_dom)
             # serper.dev next if enabled
-            if use_serper and serper_key:
+            if use_serper and SERPER_API_KEYS:
                 search_name = (e.get("nom_complet_annuaire") or denom).strip()
                 # Tailor query keywords by NAF for serper.dev (France locale via hl/gl=fr)
                 naf_str = (naf or "").strip().upper()
@@ -815,7 +896,8 @@ def process_candidate(
                     extra = " ESN SSII"
                 q = f"{search_name}{extra} site officiel"
                 # We only need the first result; request 1 to reduce cost.
-                sp_dom = serper_find_domain(q, serper_key, num=1, hl=serpapi_hl, gl=serpapi_gl)
+                # Pass api_key=None to use the rotation system
+                sp_dom = serper_find_domain(q, api_key=None, num=1, hl=serpapi_hl, gl=serpapi_gl)
                 if sp_dom:
                     guessed_domains.append(sp_dom)
             # Heuristic guesses
@@ -966,8 +1048,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--serpapi-gl", type=str, default="fr", help="SerpAPI gl (country)")
     # serper.dev options
     p.add_argument("--use-serper", action="store_true", help="Use serper.dev to find company homepage from raison sociale")
-    p.add_argument("--serper-key", type=str, default=os.getenv("SERPER_API_KEY"), help="serper.dev API key (env SERPER_API_KEY if omitted)")
+    p.add_argument("--serper-key", type=str, help="Deprecated: use SERPER_API_KEY_1, SERPER_API_KEY_2, etc. in .env file")
     return p.parse_args()
+
+
+def print_serper_usage_summary():
+    """Print a summary of Serper API key usage."""
+    if not SERPER_API_KEYS:
+        return
+    print("\n" + "="*60)
+    print("Serper API Usage Summary:")
+    print("="*60)
+    total = 0
+    for i, key in enumerate(SERPER_API_KEYS):
+        usage = SERPER_KEY_USAGE.get(i, 0)
+        total += usage
+        masked_key = key[:8] + "..." + key[-4:] if len(key) > 12 else "***"
+        print(f"  Key #{i+1} ({masked_key}): {usage} requests")
+    print(f"  Total requests: {total}")
+    print("="*60 + "\n")
 
 
 def main() -> None:
@@ -1098,7 +1197,6 @@ def main() -> None:
                 serpapi_hl=args.serpapi_hl,
                 serpapi_gl=args.serpapi_gl,
                 use_serper=args.use_serper,
-                serper_key=args.serper_key,
             )
             processed.append(row)
         except Exception as exc:
@@ -1129,6 +1227,9 @@ def main() -> None:
         print("Relevant subset saved to", filtered_path)
     except Exception as ex:
         print("Saved main CSV but failed to write filtered subset:", ex)
+    
+    # Print Serper API usage summary
+    print_serper_usage_summary()
 
 
 if __name__ == "__main__":

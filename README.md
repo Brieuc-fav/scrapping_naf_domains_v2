@@ -124,21 +124,39 @@ Notes:
 
 Vous pouvez utiliser serper.dev à la place de SerpAPI.
 
-1) Ajoutez votre clé dans `.env`:
+**Configuration avec plusieurs clés API (fallback automatique)**
+
+Le script supporte maintenant plusieurs clés API Serper avec rotation automatique. Lorsqu'une clé atteint sa limite de 2500 requêtes, le système passe automatiquement à la clé suivante.
+
+1) Ajoutez vos clés dans `.env` (jusqu'à 4 clés ou plus) :
 
 ```
-SERPER_API_KEY=<votre_cle_serper>
+# Méthode recommandée : plusieurs clés numérotées
+SERPER_API_KEY_1=votre_premiere_cle_serper
+SERPER_API_KEY_2=votre_deuxieme_cle_serper
+SERPER_API_KEY_3=votre_troisieme_cle_serper
+SERPER_API_KEY_4=votre_quatrieme_cle_serper
+
+# Méthode legacy (encore supportée) : une seule clé
+# SERPER_API_KEY=votre_cle_serper
 ```
 
-2) Lancez avec `--use-serper` (le script priorise ce nom complet affiché sur Annuaire des Entreprises quand disponible):
+2) Lancez avec `--use-serper` :
 
 ```powershell
 C:/Users/brieu/AppData/Local/Programs/Python/Python310/python.exe .\build_esn_list.py --use-recherche --use-serper --naf-codes 62.02A,71.12B --per-page 25 --max-pages 2 --outfile .\esn_recherche_sites_serper.csv --sleep 0.6
 ```
 
+**Fonctionnement du système de rotation :**
+- Le script utilise les clés dans l'ordre (KEY_1, KEY_2, KEY_3, KEY_4)
+- Quand une clé reçoit une erreur 429 (quota dépassé), le script passe automatiquement à la clé suivante
+- Vous pouvez suivre l'utilisation dans les logs : "Rotating to Serper API key #2", etc.
+- Avec 4 clés de 2500 requêtes chacune, vous pouvez faire jusqu'à 10 000 recherches au total
+
 Notes:
 - `site_source` prendra la valeur `serper` quand le domaine vient de serper.dev.
-- Vous pouvez combiner `--use-serper` et `--use-serpapi`; les deux seront tentés avant l’heuristique.
+- Vous pouvez combiner `--use-serper` et `--use-serpapi`; les deux seront tentés avant l'heuristique.
+- Le système de rotation est transparent : aucun changement n'est nécessaire dans vos commandes
 
 ## Scoring (par défaut)
 - NAF ciblé: +3
